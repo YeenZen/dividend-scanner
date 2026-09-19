@@ -89,6 +89,20 @@ DISCLAIMER = (
     "ตัวเลข yield เป็นค่าย้อนหลัง 12 เดือน ไม่ใช่การรับประกันปันผลอนาคต"
 )
 
+# กองทุน/ทรัสต์ที่สินทรัพย์บางส่วนมีวันหมดอายุ — yield อ่านแบบเดียวกับหุ้นไม่ได้
+#
+# หุ้นปกติจ่ายปันผลจากกำไรและยังถือกิจการไว้ตลอด แต่กองทุนพวกนี้จ่ายเงินสดที่มี
+# "เงินต้นของเราเอง" ปนอยู่ เพราะมูลค่าหน่วยลงทุนจะลดลงเมื่อสินทรัพย์ทยอยหมดอายุ
+# แตะ yield 10% จึงไม่ได้แปลว่าได้ผลตอบแทน 10% ต้องคิดเป็น IRR ถึงวันหมดสัญญาแทน
+#
+#   ticker: (ปี พ.ศ. ที่สินทรัพย์หลักเริ่มหมด, สิ่งที่หายไป)
+LIMITED_LIFE = {
+    "DIF": (2576, "สิทธิการเช่าเสา 39% + ไฟเบอร์ 55% หมด และหมดประกันรายได้ True "
+                  "15 ก.ย. 2576 — ส่วนที่เหลือต้องหาผู้เช่าเองในตลาดที่ลดเสาซ้ำซ้อน"),
+    "PROSPECT": (2582, "BFTZ1 หมด 2582, BFTZ2 หมด 2593, BFTZ6 หมด 2595-2597 "
+                       "(BFTZ3 กับ X44 เป็นกรรมสิทธิ์ ไม่หมดอายุ)"),
+}
+
 RE_NAMES = re.compile(r"function[(]([^)]*)[)]")
 RE_LAST = re.compile(
     r"info:[{]symbol:[A-Za-z_$]+,sign:[A-Za-z_$]+,prior:[A-Za-z_$]+,last:([A-Za-z_$]+)")
@@ -205,6 +219,32 @@ def _gap_text(r):
     return "%.1f%%" % r["drop_pct"]
 
 
+def _life_text(ticker):
+    """คืนข้อความอายุคงเหลือของกองทุนอายุจำกัด คืนค่าว่างถ้าเป็นหุ้นปกติ"""
+    if ticker not in LIMITED_LIFE:
+        return ""
+    end_be, _ = LIMITED_LIFE[ticker]
+    now_be = datetime.now(timezone(timedelta(hours=7))).year + 543
+    return "⏳ เหลือ %d ปี (ถึง %d)" % (end_be - now_be, end_be)
+
+
+def _limited_life_lines(alerts):
+    """คำเตือนสำหรับกองทุนอายุจำกัดที่ติดอยู่ในรายการแจ้งเตือนวันนี้"""
+    hits = [r for r in alerts if r["ticker"] in LIMITED_LIFE]
+    if not hits:
+        return []
+    out = ["> **อ่าน yield ของตัวที่มี ⏳ คนละแบบกับหุ้น**",
+           ">",
+           "> กองทุนพวกนี้จ่ายเงินสดที่มีเงินต้นของเราปนอยู่ เพราะมูลค่าหน่วยจะลดลง",
+           "> เมื่อสินทรัพย์ทยอยหมดอายุ แตะ 10% ไม่ได้แปลว่าได้ผลตอบแทน 10%",
+           "> ต้องคิดเป็น IRR ถึงวันหมดสัญญาโดยประเมินมูลค่าคงเหลือเองก่อนตัดสินใจ",
+           ">"]
+    out += ["> - **%s** (%s) — %s" % (r["ticker"], _life_text(r["ticker"]),
+                                      LIMITED_LIFE[r["ticker"]][1]) for r in hits]
+    out.append("")
+    return out
+
+
 def render_text(ok, failed):
     """รายงานแบบข้อความ ใช้ตอน --dry-run และเก็บเป็น log ใน repo"""
     icon = {"green": "[ถึงเป้า]", "yellow": "[ใกล้ถึง]", "grey": "[ยังไกล]"}
@@ -217,8 +257,11 @@ def render_text(ok, failed):
                   "|---|---|---|---|---|---|---|"]
         lines += ["| %s | %.2f | %.2f%% | %.2f | %s | %s | %s |"
                   % (r["ticker"], r["last"], r["yield"], r["target"],
-                     _gap_text(r), icon[r["status"]], r["note"]) for r in alerts]
+                     _gap_text(r), icon[r["status"]],
+                     " ".join(x for x in (_life_text(r["ticker"]), r["note"]) if x))
+                  for r in alerts]
         lines.append("")
+        lines += _limited_life_lines(alerts)
     else:
         lines += ["วันนี้ไม่มีหุ้นตัวไหน yield ถึง %.0f%%" % ALERT_YIELD, ""]
 
@@ -276,7 +319,24 @@ def render_html(ok, failed):
         ["หุ้น", "ราคาล่าสุด", "yield", "ราคาเป้า 10%", "ต้องตกอีก", "", "หมายเหตุ"],
         lambda r: ["<b>%s</b>" % r["ticker"], "%.2f" % r["last"],
                    "<b>%.2f%%</b>" % r["yield"], "%.2f" % r["target"],
-                   _gap_text(r), icon.get(r["status"], ""), r["note"]]))
+                   _gap_text(r), icon.get(r["status"], ""),
+                   (("<b>%s</b><br>" % _life_text(r["ticker"]))
+                    if r["ticker"] in LIMITED_LIFE else "") + r["note"]]))
+
+    # กองทุนอายุจำกัดต้องอ่าน yield คนละแบบ ไม่งั้นจะนึกว่า 10% คือผลตอบแทน 10%
+    hits = [r for r in alerts if r["ticker"] in LIMITED_LIFE]
+    if hits:
+        body.append('<div style="margin:18px 0;padding:12px 14px;background:#ddf4ff;'
+                    'border-left:4px solid #0969da;border-radius:6px;font-size:13px">')
+        body.append('<b>อ่าน yield ของตัวที่มี ⏳ คนละแบบกับหุ้น</b>'
+                    '<p style="margin:6px 0">กองทุนพวกนี้จ่ายเงินสดที่มี<b>เงินต้นของเราปนอยู่</b> '
+                    'เพราะมูลค่าหน่วยจะลดลงเมื่อสินทรัพย์ทยอยหมดอายุ — แตะ 10% '
+                    'ไม่ได้แปลว่าได้ผลตอบแทน 10% ต้องคิดเป็น IRR ถึงวันหมดสัญญา '
+                    'โดยประเมินมูลค่าคงเหลือเองก่อนตัดสินใจ</p><ul style="margin:6px 0">')
+        body += ["<li><b>%s</b> (%s) — %s</li>"
+                 % (r["ticker"], _life_text(r["ticker"]), LIMITED_LIFE[r["ticker"]][1])
+                 for r in hits]
+        body.append("</ul></div>")
 
     if failed:
         body.append('<h3 style="margin:24px 0 8px;color:#bc4c00">ดึงข้อมูลไม่สำเร็จ '
