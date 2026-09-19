@@ -1,0 +1,41 @@
+name: แจ้งเตือนหุ้นปันผลรายวัน
+
+on:
+  schedule:
+    # 00:00 UTC = 07:00 น. เวลาไทย — จันทร์ถึงศุกร์ (ตลาดไทยหยุดเสาร์อาทิตย์)
+    - cron: "0 0 * * 1-5"
+  workflow_dispatch:        # กดรันเองได้จากแท็บ Actions
+
+permissions:
+  contents: write           # ใช้ commit log รายวันกลับเข้า repo
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # สคริปต์ใช้ stdlib ล้วน ไม่ต้อง pip install อะไรเลย
+      - name: ส่งอีเมลแจ้งเตือน
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python alert.py | tee /tmp/report.md
+
+      # เก็บผลไว้ดูย้อนหลัง และทำให้ repo มี activity
+      # (GitHub ปิด scheduled workflow อัตโนมัติถ้า repo เงียบเกิน 60 วัน)
+      - name: บันทึกผลลง repo
+        if: always()
+        run: |
+          mkdir -p scans
+          cp /tmp/report.md "scans/$(TZ=Asia/Bangkok date +%Y-%m-%d).md"
+          git config user.name "dividend-scanner"
+          git config user.email "noreply@github.com"
+          git add scans
+          git diff --staged --quiet || git commit -m "scan $(TZ=Asia/Bangkok date +%Y-%m-%d)"
+          git push
