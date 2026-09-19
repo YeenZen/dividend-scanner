@@ -107,6 +107,8 @@ RE_NAMES = re.compile(r"function[(]([^)]*)[)]")
 RE_LAST = re.compile(
     r"info:[{]symbol:[A-Za-z_$]+,sign:[A-Za-z_$]+,prior:[A-Za-z_$]+,last:([A-Za-z_$]+)")
 RE_YIELD = re.compile(r"highlightData:[{][^}]*?dividendYield:([A-Za-z_$]+)")
+# yield ย้อนหลัง 12 เดือนที่ SET คำนวณเอง — ใช้ตัวนี้ก่อนเสมอ
+RE_YIELD_12M = re.compile(r"dividendYield12M:([A-Za-z_$]+|[0-9.]+)")
 
 
 # ── ดึงข้อมูล ───────────────────────────────────────────────────────────────────
@@ -151,7 +153,14 @@ def _split_args(tail):
 
 
 def fetch_quote(symbol):
-    """คืน (ราคาล่าสุด, yield %) — โยน exception พร้อมเหตุผลถ้าดึงไม่ได้"""
+    """
+    คืน (ราคาล่าสุด, yield %, ที่มาของ yield) — โยน exception พร้อมเหตุผลถ้าดึงไม่ได้
+
+    ใช้ dividendYield12M ก่อนเสมอ เพราะ dividendYield ธรรมดาเพี้ยนกับหุ้นที่จ่าย
+    ปันผลมากกว่าปีละครั้ง — มันหยิบมาไม่ครบทุกงวด ตรวจเทียบ 33 ตัวแล้วเพี้ยน 7 ตัว
+    หนักสุดคือ PRM (5.24% vs 7.33%) และ PROSPECT (7.30% vs 8.98%) ซึ่งมากพอ
+    จะทำให้พลาดการแจ้งเตือนไปทั้งตัว
+    """
     url = "https://www.settrade.com/th/equities/quote/%s/overview" % symbol
     req = urllib.request.Request(url, headers={"user-agent": UA})
     html = urllib.request.urlopen(req, timeout=45).read().decode("utf-8", "replace")
@@ -170,15 +179,29 @@ def fetch_quote(symbol):
         raise ValueError("จำนวนตัวแปรไม่ตรงกับค่า (%d vs %d)" % (len(names), len(vals)))
     env = dict(zip(names, vals))
 
-    m_last, m_yield = RE_LAST.search(html), RE_YIELD.search(html)
-    if not m_last or not m_yield:
-        raise ValueError("หาตัวแปรราคา/dividendYield ไม่เจอ")
-
+    m_last = RE_LAST.search(html)
+    if not m_last:
+        raise ValueError("หาตัวแปรราคาไม่เจอ")
     last = env.get(m_last.group(1))
-    dy = env.get(m_yield.group(1))
-    if last in (None, "a", "null") or dy in (None, "a", "null"):
-        raise ValueError("ค่าราคาหรือ yield เป็น null (หุ้นอาจไม่มีข้อมูลปันผล)")
-    return float(last), float(dy)
+    if last in (None, "a", "null"):
+        raise ValueError("ค่าราคาเป็น null")
+
+    def lookup(match):
+        """ค่าใน payload เป็นได้ทั้งตัวเลขตรง ๆ และชื่อตัวแปรที่ต้องเปิดตาราง"""
+        if not match:
+            return None
+        tok = match.group(1)
+        v = tok if re.fullmatch(r"[0-9.]+", tok) else env.get(tok)
+        return None if v in (None, "a", "null") else v
+
+    dy = lookup(RE_YIELD_12M.search(html))
+    source = "12M"
+    if dy is None:
+        dy = lookup(RE_YIELD.search(html))
+        source = "ปกติ"
+    if dy is None:
+        raise ValueError("ไม่พบค่า dividendYield ทั้งสองแบบ (หุ้นอาจไม่มีข้อมูลปันผล)")
+    return float(last), float(dy), source
 
 
 def scan(watchlist):
@@ -186,14 +209,15 @@ def scan(watchlist):
     def one(item):
         sym, note = item
         try:
-            last, dy = fetch_quote(sym)
+            last, dy, source = fetch_quote(sym)
             target = last * dy / TARGET_YIELD          # ราคาที่ทำให้ yield = 10%
             drop = (1 - target / last) * 100 if last else 0
             status = ("green" if dy >= TARGET_YIELD
                       else "yellow" if dy >= ALERT_YIELD
                       else "grey")
             return {"ticker": sym, "note": note, "last": last, "yield": dy,
-                    "target": target, "drop_pct": drop, "status": status}
+                    "target": target, "drop_pct": drop, "status": status,
+                    "source": source}
         except Exception as exc:
             return {"ticker": sym, "note": note,
                     "error": "%s: %s" % (type(exc).__name__, exc)}
