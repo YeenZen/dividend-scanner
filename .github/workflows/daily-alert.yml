@@ -21,6 +21,10 @@ jobs:
 
       # สคริปต์ใช้ stdlib ล้วน ไม่ต้อง pip install อะไรเลย
       - name: ส่งอีเมลแจ้งเตือน
+        # ต้องมี pipefail ไม่งั้น exit code จะเป็นของ tee ซึ่งสำเร็จเสมอ
+        # สคริปต์พังแล้ว job จะขึ้นเขียว = ระบบตายเงียบ ซึ่งแยกไม่ออกจาก
+        # "วันนี้ไม่มีหุ้นถึงเป้า" — เคยเกิดจริงตอนทดสอบ 20 ก.ย. 2569
+        shell: bash -eo pipefail {0}
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
