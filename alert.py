@@ -104,8 +104,11 @@ LIMITED_LIFE = {
 }
 
 RE_NAMES = re.compile(r"function[(]([^)]*)[)]")
-RE_LAST = re.compile(
-    r"info:[{]symbol:[A-Za-z_$]+,sign:[A-Za-z_$]+,prior:[A-Za-z_$]+,last:([A-Za-z_$]+)")
+# จับทั้ง prior (ราคาปิดก่อนหน้า) และ last (ราคาล่าสุดของ session ปัจจุบัน)
+# ต้องมี prior เพราะก่อนตลาดเปิด Settrade จะรีเซ็ต last เป็น null ทุกวันทำการ
+RE_PRICES = re.compile(
+    r"info:[{]symbol:[A-Za-z_$]+,sign:[A-Za-z_$]+"
+    r",prior:([A-Za-z_$]+|[0-9.]+),last:([A-Za-z_$]+|[0-9.]+)")
 RE_YIELD = re.compile(r"highlightData:[{][^}]*?dividendYield:([A-Za-z_$]+)")
 # yield ย้อนหลัง 12 เดือนที่ SET คำนวณเอง — ใช้ตัวนี้ก่อนเสมอ
 RE_YIELD_12M = re.compile(r"dividendYield12M:([A-Za-z_$]+|[0-9.]+)")
@@ -179,20 +182,29 @@ def fetch_quote(symbol):
         raise ValueError("จำนวนตัวแปรไม่ตรงกับค่า (%d vs %d)" % (len(names), len(vals)))
     env = dict(zip(names, vals))
 
-    m_last = RE_LAST.search(html)
-    if not m_last:
-        raise ValueError("หาตัวแปรราคาไม่เจอ")
-    last = env.get(m_last.group(1))
-    if last in (None, "a", "null"):
-        raise ValueError("ค่าราคาเป็น null")
-
-    def lookup(match):
+    def resolve(tok):
         """ค่าใน payload เป็นได้ทั้งตัวเลขตรง ๆ และชื่อตัวแปรที่ต้องเปิดตาราง"""
-        if not match:
+        if tok is None:
             return None
-        tok = match.group(1)
         v = tok if re.fullmatch(r"[0-9.]+", tok) else env.get(tok)
         return None if v in (None, "a", "null") else v
+
+    def lookup(match, group=1):
+        return resolve(match.group(group)) if match else None
+
+    m_price = RE_PRICES.search(html)
+    if not m_price:
+        raise ValueError("หาตัวแปรราคาไม่เจอ")
+
+    # ก่อนตลาดเปิด last เป็น null ทุกวันทำการ ต้องถอยไปใช้ราคาปิดก่อนหน้า
+    # ไม่งั้นรอบ 07:00 จะพังทุกเช้า (ตลาดไทยเปิด 10:00)
+    last = lookup(m_price, 2)
+    price_kind = "ล่าสุด"
+    if last is None:
+        last = lookup(m_price, 1)
+        price_kind = "ปิดก่อนหน้า"
+    if last is None:
+        raise ValueError("ไม่มีทั้งราคาล่าสุดและราคาปิดก่อนหน้า")
 
     dy = lookup(RE_YIELD_12M.search(html))
     source = "12M"
@@ -201,7 +213,7 @@ def fetch_quote(symbol):
         source = "ปกติ"
     if dy is None:
         raise ValueError("ไม่พบค่า dividendYield ทั้งสองแบบ (หุ้นอาจไม่มีข้อมูลปันผล)")
-    return float(last), float(dy), source
+    return float(last), float(dy), source, price_kind
 
 
 def scan(watchlist):
@@ -209,7 +221,7 @@ def scan(watchlist):
     def one(item):
         sym, note = item
         try:
-            last, dy, source = fetch_quote(sym)
+            last, dy, source, price_kind = fetch_quote(sym)
             target = last * dy / TARGET_YIELD          # ราคาที่ทำให้ yield = 10%
             drop = (1 - target / last) * 100 if last else 0
             status = ("green" if dy >= TARGET_YIELD
@@ -217,7 +229,7 @@ def scan(watchlist):
                       else "grey")
             return {"ticker": sym, "note": note, "last": last, "yield": dy,
                     "target": target, "drop_pct": drop, "status": status,
-                    "source": source}
+                    "source": source, "price_kind": price_kind}
         except Exception as exc:
             return {"ticker": sym, "note": note,
                     "error": "%s: %s" % (type(exc).__name__, exc)}
@@ -269,11 +281,21 @@ def _limited_life_lines(alerts):
     return out
 
 
+def _price_note(ok):
+    """บอกที่มาของราคาเมื่อดึงก่อนตลาดเปิด ไม่งั้นจะงงว่าทำไมราคาไม่ขยับ"""
+    if ok and all(r.get("price_kind") == "ปิดก่อนหน้า" for r in ok):
+        return "ราคาที่ใช้คือราคาปิดวันทำการก่อนหน้า (ตลาดยังไม่เปิด)"
+    return ""
+
+
 def render_text(ok, failed):
     """รายงานแบบข้อความ ใช้ตอน --dry-run และเก็บเป็น log ใน repo"""
     icon = {"green": "[ถึงเป้า]", "yellow": "[ใกล้ถึง]", "grey": "[ยังไกล]"}
     alerts = sorted([r for r in ok if r["status"] != "grey"], key=lambda r: -r["yield"])
     lines = ["# แจ้งเตือนหุ้นปันผล %s" % thai_date(), ""]
+    note = _price_note(ok)
+    if note:
+        lines += ["_%s_" % note, ""]
 
     if alerts:
         lines += ["## ถึงเป้าหรือใกล้ถึง (yield >= %.0f%%)" % ALERT_YIELD, "",
@@ -333,8 +355,9 @@ def render_html(ok, failed):
     body = ['<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
             'Roboto,sans-serif;max-width:760px;margin:0 auto;padding:16px;color:#1f2328">']
     body.append('<h2 style="margin:0 0 4px">แจ้งเตือนหุ้นปันผล</h2>')
-    body.append('<p style="margin:0 0 18px;color:#656d76;font-size:14px">%s</p>'
-                % thai_date())
+    note = _price_note(ok)
+    body.append('<p style="margin:0 0 18px;color:#656d76;font-size:14px">%s%s</p>'
+                % (thai_date(), (" · " + note) if note else ""))
 
     body.append('<h3 style="margin:20px 0 8px">ถึงเป้าหรือใกล้ถึง '
                 '(yield ตั้งแต่ %.0f%%)</h3>' % ALERT_YIELD)
