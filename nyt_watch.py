@@ -54,6 +54,35 @@ def fetch_items():
     return out
 
 
+ANNOUNCE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "nyt", "announcements.md")
+
+
+def now_th():
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M")
+
+
+def write_announcements(items):
+    """
+    เขียนรายการประกาศล่าสุดลงไฟล์ให้ routine ใน Claude อ่าน
+
+    ต้องผ่านไฟล์เพราะ sandbox ของ cloud routine บล็อกเน็ตขาออก ดึง RSS เองไม่ได้
+    เหมือนที่บล็อก settrade.com — ฝั่ง GitHub ซึ่งเน็ตเปิดจึงเป็นคนดึงให้
+    """
+    os.makedirs(os.path.dirname(ANNOUNCE), exist_ok=True)
+    out = ["# ประกาศของ NYT ที่แจ้งตลาดหลักทรัพย์", "",
+           "ดึงล่าสุด %s (เวลาไทย) จาก RSS ของ listedcompany" % now_th(), "",
+           "🔴 = เกี่ยวกับสัมปทาน/ท่าเทียบเรือ/ประมูล ซึ่งเป็นเรื่องที่รออยู่", "",
+           "| วันที่ประกาศ | หัวข้อ | ลิงก์ |", "|---|---|---|"]
+    for r in items:
+        mark = "🔴 " if is_hot(r["title"]) else ""
+        out.append("| %s | %s%s | %s |" % (r["date"], mark, r["title"], r["link"]))
+    out.append("")
+    with io.open(ANNOUNCE, "w", encoding="utf-8") as f:
+        f.write(chr(10).join(out))
+
+
 def is_hot(title):
     t = title.lower()
     return any(k.lower() in t for k in HOT)
@@ -105,11 +134,53 @@ def render(new_items):
     return "".join(body)
 
 
+def open_issue(new_items):
+    """
+    เปิด GitHub Issue เมื่อเจอประกาศเรื่องสัมปทาน
+
+    ทำไมใช้ Issue ไม่ใช่อีเมล: GITHUB_TOKEN มีมาให้อัตโนมัติใน Actions
+    ไม่ต้องตั้ง secret อะไรเลย และ GitHub จะส่ง push เข้าแอปมือถือให้เอง
+    จึงรู้ภายในชั่วโมงแทนที่จะรอรายงานสรุปเช้าวันรุ่งขึ้น
+    """
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        print("ไม่ได้รันใน GitHub Actions — ข้ามการเปิด issue")
+        return
+    hot = [r for r in new_items if is_hot(r["title"])]
+    if not hot:
+        return
+    body = ["ประกาศใหม่จาก NYT ที่เกี่ยวกับสัมปทาน/ท่าเทียบเรือ", ""]
+    for r in hot:
+        body.append("- **%s** (%s)" % (r["title"], r["date"]))
+        body.append("  %s" % r["link"])
+    body += ["", "---", "",
+             "สัญญาสัมปทานท่าเทียบเรือ A5 ซึ่งเป็นรายได้ราว 80% ของ NYT",
+             "สิ้นสุดไปแล้ว 30 เม.ย. 2569 ปัจจุบันเดินเครื่องชั่วคราวโดยยังไม่มีสัญญาใหม่",
+             "และ กทท. ยังไม่เปิดประมูล ข่าวนี้อาจเปลี่ยนสถานะดังกล่าว"]
+    payload = json.dumps({
+        "title": "NYT ประกาศเรื่องสัมปทาน %d ฉบับ" % len(hot),
+        "body": chr(10).join(body),
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.github.com/repos/%s/issues" % repo, data=payload,
+        headers={"authorization": "Bearer %s" % token,
+                 "accept": "application/vnd.github+json",
+                 "content-type": "application/json"})
+    try:
+        r = json.loads(urllib.request.urlopen(req, timeout=45).read())
+        print("เปิด issue แล้ว: %s" % r.get("html_url"))
+    except Exception as exc:
+        print("เปิด issue ไม่สำเร็จ: %s" % exc)
+
+
 def main():
     dry = "--dry-run" in sys.argv
     items = fetch_items()
     if not items:
         raise RuntimeError("ดึง RSS ไม่ได้หรือ feed ว่าง — โครงสร้างอาจเปลี่ยน")
+
+    write_announcements(items)      # เขียนไฟล์ให้ routine อ่านเสมอ
 
     seen = load_seen()
     if seen is None:
@@ -135,7 +206,14 @@ def main():
     if dry:
         print("\n[dry-run] ไม่ส่งอีเมล | หัวข้อที่จะใช้: %s" % subject)
         return 0
-    send_email(subject, render(new))
+    open_issue(new)          # push เข้าแอปมือถือผ่าน GitHub ไม่ต้องมี secret
+
+    # อีเมลเป็นของแถมแล้ว ทางหลักคือ routine อ่านไฟล์ที่เขียนไว้ข้างบน
+    # ถ้ายังไม่ได้ตั้ง secret ก็ข้ามไป ไม่ต้องให้ workflow ล้มทั้งรอบ
+    if os.environ.get('GMAIL_USER') and os.environ.get('GMAIL_APP_PASSWORD'):
+        send_email(subject, render(new))
+    else:
+        print('ยังไม่ตั้ง secret อีเมล — ข้ามการส่ง (ไฟล์เขียนแล้ว routine อ่านเอง)')
     save_seen(seen | {r["id"] for r in items})
     return 0
 
