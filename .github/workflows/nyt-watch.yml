@@ -1,0 +1,46 @@
+name: เฝ้าประกาศ NYT
+
+on:
+  schedule:
+    # 00:00-13:00 UTC = 07:00-20:00 น. เวลาไทย ทุกชั่วโมง จันทร์-ศุกร์
+    # หมายเหตุ: ตัวจับเวลาของ GitHub ชั้นฟรีหน่วงจริง 2-3 ชม. และข้ามรอบได้
+    # เมื่อระบบงานล้น จึงไม่ใช่การเฝ้าแบบเรียลไทม์
+    - cron: "0 0-13 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# กันหลายรอบชนกันตอน GitHub ยิงย้อนหลังรวดเดียว จะได้ไม่ส่งเมลซ้ำ
+concurrency:
+  group: nyt-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ตรวจประกาศใหม่
+        shell: bash -eo pipefail {0}
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
+        run: python nyt_watch.py
+
+      - name: บันทึกสถานะกลับเข้า repo
+        if: always()
+        run: |
+          git config user.name "dividend-scanner"
+          git config user.email "noreply@github.com"
+          git add state
+          git diff --staged --quiet || {
+            git commit -m "nyt: เห็นประกาศใหม่ $(TZ=Asia/Bangkok date +%Y-%m-%d\ %H:%M)"
+            git pull --rebase -q && git push
+          }
