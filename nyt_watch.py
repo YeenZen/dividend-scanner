@@ -38,7 +38,12 @@ HOT = ["สัมปทาน", "ท่าเทียบเรือ", "เอ 
 def fetch_items():
     """คืนรายการประกาศจาก RSS ใหม่→เก่า แต่ละตัวเป็น dict(id, title, date, link)"""
     req = urllib.request.Request(FEED, headers={"user-agent": UA})
-    xml = urllib.request.urlopen(req, timeout=45).read().decode("utf-8", "replace")
+    resp = urllib.request.urlopen(req, timeout=45)
+    xml = resp.read().decode("utf-8", "replace")
+    # พิมพ์ลักษณะของสิ่งที่ได้มาเสมอ เพื่อให้วินิจฉัยได้เวลาปลายทางตอบคนละอย่าง
+    print("RSS: HTTP %s | ปลายทาง %s | %d ตัวอักษร | ชนิด %s"
+          % (resp.status, resp.geturl(), len(xml), resp.headers.get("content-type")))
+    print("300 ตัวแรก: %s" % xml[:300].replace(chr(10), " "))
     out = []
     for block in re.findall(r"<item>(.*?)</item>", xml, re.S):
         def grab(tag):
