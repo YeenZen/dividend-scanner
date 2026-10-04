@@ -10,7 +10,7 @@
     ข่าวว่าเซ็นสัญญาใหม่หรือเปิดประมูลจะขยับราคาแรงทั้งขึ้นและลง
     จึงคุ้มที่จะรู้ภายในชั่วโมงแทนที่จะรู้ตอนเช้าวันรุ่งขึ้น
 
-แหล่งข้อมูล: RSS ของ listedcompany ซึ่งดึงได้ด้วย HTTP ธรรมดา ไม่ต้องมี browser
+แหล่งข้อมูล: หน้าข่าวของ settrade ซึ่งดึงได้ด้วย HTTP ธรรมดา ไม่ต้องมี browser
 สถานะ (id ที่เคยเห็นแล้ว) เก็บใน state/nyt_seen.json แล้ว commit กลับเข้า repo
 
 รันเอง: python nyt_watch.py --dry-run
@@ -26,7 +26,11 @@ import urllib.request
 
 from alert import UA, send_email, thai_date      # ใช้ตัวส่งอีเมลร่วมกับระบบหลัก
 
-FEED = "https://nyt.listedcompany.com/newsroom_rss.html"
+# ใช้ settrade ไม่ใช่ listedcompany เพราะ listedcompany ตอบ HTTP 202 เนื้อหาว่าง
+# ให้ IP นอกประเทศไทย (ทดสอบบน GitHub runner แล้ว) ส่วน settrade ตอบเต็มทั้งสองที่
+FEED = "https://www.settrade.com/th/equities/quote/NYT/news"
+
+Q = chr(34)    # อัญประกาศคู่ — เลี่ยงพิมพ์ตรง ๆ ให้โค้ดอ่านง่าย
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "nyt_seen.json")
 
 # คำที่ถ้าโผล่ในหัวข้อ แปลว่าเป็นข่าวสัมปทานที่รออยู่ ไม่ใช่ประกาศทั่วไป
@@ -36,28 +40,43 @@ HOT = ["สัมปทาน", "ท่าเทียบเรือ", "เอ 
 
 
 def fetch_items():
-    """คืนรายการประกาศจาก RSS ใหม่→เก่า แต่ละตัวเป็น dict(id, title, date, link)"""
-    req = urllib.request.Request(FEED, headers={"user-agent": UA})
-    resp = urllib.request.urlopen(req, timeout=45)
-    xml = resp.read().decode("utf-8", "replace")
-    # พิมพ์ลักษณะของสิ่งที่ได้มาเสมอ เพื่อให้วินิจฉัยได้เวลาปลายทางตอบคนละอย่าง
-    print("RSS: HTTP %s | ปลายทาง %s | %d ตัวอักษร | ชนิด %s"
-          % (resp.status, resp.geturl(), len(xml), resp.headers.get("content-type")))
-    print("300 ตัวแรก: %s" % xml[:300].replace(chr(10), " "))
-    out = []
-    for block in re.findall(r"<item>(.*?)</item>", xml, re.S):
-        def grab(tag):
-            m = re.search(r"<%s>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</%s>" % (tag, tag),
-                          block, re.S)
-            return html.unescape(m.group(1).strip()) if m else ""
-        link = grab("link")
-        m = re.search(r"/id/(\d+)", link)
-        if not m:
-            continue
-        out.append({"id": m.group(1), "title": grab("title"),
-                    "date": grab("pubDate"), "link": link})
-    return out
+    """
+    คืนรายการประกาศที่ NYT แจ้งตลาดหลักทรัพย์ เรียงใหม่ไปเก่า
 
+    ดึงจากหน้าข่าวของ settrade ซึ่งเป็น Nuxt SSR ฝังข้อมูลมาใน HTML อยู่แล้ว
+    หัวข้อกับวันที่อยู่ใต้คีย์ dataNewsSET เป็นข้อความตรง ๆ ไม่ต้องถอดตารางตัวแปร
+    แบบหน้าราคา จึงแกะด้วยการตัดสตริงธรรมดาได้
+    """
+    req = urllib.request.Request(FEED, headers={"user-agent": UA})
+    text = urllib.request.urlopen(req, timeout=45).read().decode("utf-8", "replace")
+
+    k = text.find("dataNewsSET")
+    if k < 0:
+        raise RuntimeError("ไม่พบ dataNewsSET ในหน้า settrade — โครงสร้างเว็บอาจเปลี่ยน")
+    block = text[k:k + 400000]
+
+    # settrade หนี escape บางตัวมาในรูป uXXXX ของ JS ต้องแปลงกลับให้อ่านออก
+    ESC = ((chr(92) + "u002F", "/"), (chr(92) + "u0026", "&"),
+           (chr(92) + "u003C", "<"), (chr(92) + "u003E", ">"))
+
+    out, got = [], set()
+    for chunk in block.split("uuid:" + Q)[1:]:
+        uid = chunk.split(Q, 1)[0]
+        if not uid.isdigit() or uid in got or ("title:" + Q) not in chunk:
+            continue
+        title = chunk.split("title:" + Q, 1)[1].split(Q, 1)[0]
+        if not title.strip():
+            continue
+        for esc, real in ESC:
+            title = title.replace(esc, real)
+        pub = ""
+        if ("publishDate:" + Q) in chunk:
+            pub = chunk.split("publishDate:" + Q, 1)[1].split(Q, 1)[0]
+        got.add(uid)
+        out.append({"id": uid, "title": html.unescape(title),
+                    "date": pub[:16].replace("T", " "),
+                    "link": FEED + "?newsId=" + uid})
+    return out
 
 ANNOUNCE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "nyt", "announcements.md")
@@ -77,7 +96,7 @@ def write_announcements(items):
     """
     os.makedirs(os.path.dirname(ANNOUNCE), exist_ok=True)
     out = ["# ประกาศของ NYT ที่แจ้งตลาดหลักทรัพย์", "",
-           "ดึงล่าสุด %s (เวลาไทย) จาก RSS ของ listedcompany" % now_th(), "",
+           "ดึงล่าสุด %s (เวลาไทย) จากหน้าข่าวของ settrade" % now_th(), "",
            "🔴 = เกี่ยวกับสัมปทาน/ท่าเทียบเรือ/ประมูล ซึ่งเป็นเรื่องที่รออยู่", "",
            "| วันที่ประกาศ | หัวข้อ | ลิงก์ |", "|---|---|---|"]
     for r in items:
@@ -135,7 +154,7 @@ def render(new_items):
         body.append("</ul>")
 
     body.append('<p style="margin:24px 0 0;font-size:12px;color:#8c959f">'
-                'เฝ้าจาก RSS ของ listedcompany ทุกชั่วโมง 07:00-20:00 น. จันทร์-ศุกร์</p></div>')
+                'เฝ้าจากหน้าข่าวของ settrade ทุกชั่วโมง 07:00-20:00 น. จันทร์-ศุกร์</p></div>')
     return "".join(body)
 
 
@@ -183,7 +202,7 @@ def main():
     dry = "--dry-run" in sys.argv
     items = fetch_items()
     if not items:
-        raise RuntimeError("ดึง RSS ไม่ได้หรือ feed ว่าง — โครงสร้างอาจเปลี่ยน")
+        raise RuntimeError("ดึงหน้าข่าว settrade ไม่ได้หรือไม่มีรายการ — โครงสร้างอาจเปลี่ยน")
 
     write_announcements(items)      # เขียนไฟล์ให้ routine อ่านเสมอ
 
