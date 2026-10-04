@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-เฝ้าประกาศที่ NYT แจ้งตลาดหลักทรัพย์ แล้วส่งอีเมลทันทีที่มีฉบับใหม่
+เฝ้าประกาศที่ NYT แจ้งตลาดหลักทรัพย์ แล้วเขียนลงไฟล์ให้รายงานเช้าในแอป Claude อ่าน
 
 ทำไมต้องเฝ้าตัวนี้เป็นพิเศษ:
     สัญญาสัมปทานท่าเทียบเรือ A5 ซึ่งเป็นรายได้ ~80% ของ NYT สิ้นสุดไปแล้ว
@@ -24,7 +24,7 @@ import re
 import sys
 import urllib.request
 
-from alert import UA, send_email, thai_date      # ใช้ตัวส่งอีเมลร่วมกับระบบหลัก
+from alert import UA, thai_date      # ใช้ค่า user-agent และวันที่ไทยร่วมกับระบบหลัก
 
 # ใช้ settrade ไม่ใช่ listedcompany เพราะ listedcompany ตอบ HTTP 202 เนื้อหาว่าง
 # ให้ IP นอกประเทศไทย (ทดสอบบน GitHub runner แล้ว) ส่วน settrade ตอบเต็มทั้งสองที่
@@ -158,89 +158,33 @@ def render(new_items):
     return "".join(body)
 
 
-def open_issue(new_items):
-    """
-    เปิด GitHub Issue เมื่อเจอประกาศเรื่องสัมปทาน
-
-    ทำไมใช้ Issue ไม่ใช่อีเมล: GITHUB_TOKEN มีมาให้อัตโนมัติใน Actions
-    ไม่ต้องตั้ง secret อะไรเลย และ GitHub จะส่ง push เข้าแอปมือถือให้เอง
-    จึงรู้ภายในชั่วโมงแทนที่จะรอรายงานสรุปเช้าวันรุ่งขึ้น
-    """
-    token = os.environ.get("GITHUB_TOKEN")
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    if not token or not repo:
-        print("ไม่ได้รันใน GitHub Actions — ข้ามการเปิด issue")
-        return
-    hot = [r for r in new_items if is_hot(r["title"])]
-    if not hot:
-        return
-    body = ["ประกาศใหม่จาก NYT ที่เกี่ยวกับสัมปทาน/ท่าเทียบเรือ", ""]
-    for r in hot:
-        body.append("- **%s** (%s)" % (r["title"], r["date"]))
-        body.append("  %s" % r["link"])
-    body += ["", "---", "",
-             "สัญญาสัมปทานท่าเทียบเรือ A5 ซึ่งเป็นรายได้ราว 80% ของ NYT",
-             "สิ้นสุดไปแล้ว 30 เม.ย. 2569 ปัจจุบันเดินเครื่องชั่วคราวโดยยังไม่มีสัญญาใหม่",
-             "และ กทท. ยังไม่เปิดประมูล ข่าวนี้อาจเปลี่ยนสถานะดังกล่าว"]
-    payload = json.dumps({
-        "title": "NYT ประกาศเรื่องสัมปทาน %d ฉบับ" % len(hot),
-        "body": chr(10).join(body),
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.github.com/repos/%s/issues" % repo, data=payload,
-        headers={"authorization": "Bearer %s" % token,
-                 "accept": "application/vnd.github+json",
-                 "content-type": "application/json"})
-    try:
-        r = json.loads(urllib.request.urlopen(req, timeout=45).read())
-        print("เปิด issue แล้ว: %s" % r.get("html_url"))
-    except Exception as exc:
-        print("เปิด issue ไม่สำเร็จ: %s" % exc)
-
-
 def main():
+    """
+    ตรวจประกาศใหม่แล้วเขียนลงไฟล์
+
+    ไม่ส่งอีเมลและไม่เปิด issue แล้ว เพราะทดสอบแล้วทั้งสองทางไม่เวิร์ก
+    (GitHub ไม่แจ้งเตือนเรื่องที่เจ้าของ repo เป็นคนเปิดเอง และผู้ใช้ไม่เอาอีเมล)
+    ช่องทางเดียวที่ใช้จริงคือรายงานเช้าในแอป Claude ซึ่งอ่านไฟล์นี้
+    """
     dry = "--dry-run" in sys.argv
     items = fetch_items()
     if not items:
         raise RuntimeError("ดึงหน้าข่าว settrade ไม่ได้หรือไม่มีรายการ — โครงสร้างอาจเปลี่ยน")
 
-    write_announcements(items)      # เขียนไฟล์ให้ routine อ่านเสมอ
+    write_announcements(items)
 
-    seen = load_seen()
-    if seen is None:
-        # รันครั้งแรก: จำของเดิมทั้งหมดไว้เฉย ๆ ไม่ส่งอีเมลย้อนหลัง
-        print("ครั้งแรก — บันทึก %d รายการเดิมไว้ ไม่ส่งอีเมล" % len(items))
-        for r in items[:5]:
-            print("   %s | %s" % (r["date"][:20], r["title"][:70]))
-        if not dry:
-            save_seen({r["id"] for r in items})
-        return 0
-
+    seen = load_seen() or set()
     new = [r for r in items if r["id"] not in seen]
-    print("ใน feed %d รายการ | เคยเห็นแล้ว %d | ใหม่ %d" % (len(items), len(seen), len(new)))
+    print("ในหน้าข่าว %d รายการ | เคยเห็นแล้ว %d | ใหม่ %d"
+          % (len(items), len(seen), len(new)))
     for r in new:
-        print("   %s %s | %s" % ("🔴" if is_hot(r["title"]) else "  ",
-                                 r["date"][:20], r["title"][:70]))
-    if not new:
-        return 0
-
-    hot = any(is_hot(r["title"]) for r in new)
-    subject = ("🔴 NYT ประกาศเรื่องสัมปทาน/ท่าเทียบเรือ — %s" % thai_date() if hot
-               else "NYT มีประกาศใหม่ %d ฉบับ — %s" % (len(new), thai_date()))
-    if dry:
-        print("\n[dry-run] ไม่ส่งอีเมล | หัวข้อที่จะใช้: %s" % subject)
-        return 0
-    open_issue(new)          # push เข้าแอปมือถือผ่าน GitHub ไม่ต้องมี secret
-
-    # อีเมลเป็นของแถมแล้ว ทางหลักคือ routine อ่านไฟล์ที่เขียนไว้ข้างบน
-    # ถ้ายังไม่ได้ตั้ง secret ก็ข้ามไป ไม่ต้องให้ workflow ล้มทั้งรอบ
-    if os.environ.get('GMAIL_USER') and os.environ.get('GMAIL_APP_PASSWORD'):
-        send_email(subject, render(new))
-    else:
-        print('ยังไม่ตั้ง secret อีเมล — ข้ามการส่ง (ไฟล์เขียนแล้ว routine อ่านเอง)')
-    save_seen(seen | {r["id"] for r in items})
+        print("   %s %s | %s" % ("[สัมปทาน]" if is_hot(r["title"]) else "         ",
+                                 r["date"], r["title"][:70]))
+    if new and any(is_hot(r["title"]) for r in new):
+        print("*** มีประกาศเรื่องสัมปทาน/ท่าเทียบเรือ — รายงานเช้าจะชูเรื่องนี้ขึ้นก่อน ***")
+    if not dry:
+        save_seen({r["id"] for r in items})
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -25,10 +25,6 @@ jobs:
         # สคริปต์พังแล้ว job จะขึ้นเขียว = ระบบตายเงียบ ซึ่งแยกไม่ออกจาก
         # "วันนี้ไม่มีหุ้นถึงเป้า" — เคยเกิดจริงตอนทดสอบ 20 ก.ย. 2569
         shell: bash -eo pipefail {0}
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          ALERT_TO: ${{ secrets.ALERT_TO }}
         run: python alert.py | tee /tmp/report.md
 
       # เก็บผลไว้ดูย้อนหลัง และทำให้ repo มี activity

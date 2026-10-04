@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: write
-  issues: write      # เปิด issue เพื่อ push เข้าแอปมือถือ ไม่ต้องใช้ secret
 
 # กันหลายรอบชนกันตอน GitHub ยิงย้อนหลังรวดเดียว จะได้ไม่ส่งเมลซ้ำ
 concurrency:
@@ -29,11 +28,6 @@ jobs:
 
       - name: ตรวจประกาศใหม่
         shell: bash -eo pipefail {0}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          ALERT_TO: ${{ secrets.ALERT_TO }}
         run: python nyt_watch.py
 
       - name: บันทึกสถานะกลับเข้า repo

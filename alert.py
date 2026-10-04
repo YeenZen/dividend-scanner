@@ -477,6 +477,12 @@ def main():
         print("\nไม่มีหุ้นถึงเกณฑ์ %.0f%% — ไม่ส่งอีเมล" % ALERT_YIELD)
         return 0
 
+    # ช่องทางหลักคือรายงานเช้าในแอป Claude ซึ่งอ่านจากไฟล์ที่ workflow commit ไว้
+    # อีเมลเป็นทางเลือกเสริม ถ้าไม่ได้ตั้ง secret ก็ข้ามไป ไม่ต้องให้ job ล้มทั้งรอบ
+    if not (os.environ.get('GMAIL_USER') and os.environ.get('GMAIL_APP_PASSWORD')):
+        print('ไม่ได้ตั้ง secret อีเมล — ข้ามการส่ง (รายงานอ่านจากไฟล์ที่ commit ไว้แทน)')
+        return 0
+
     subject = ("🟢 หุ้นปันผลถึงเป้า 10%% แล้ว %d ตัว — %s"
                % (len(alerts), thai_date()) if n_green else
                "🟡 หุ้นปันผลใกล้ถึงเป้า %d ตัว — %s" % (len(alerts), thai_date()))
